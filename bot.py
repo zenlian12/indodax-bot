@@ -104,12 +104,13 @@ def load_state():
 def save_state(state):
     with open(STATE_FILE, 'w') as f:
         json.dump(state, f)
-    # Commit and push using PAT for authentication
+    # Use environment variables for GitHub repository and PAT
+    repo_url = f"https://{os.environ['PAT']}@github.com/{os.environ['GITHUB_REPOSITORY']}.git"
     os.system('git config --global user.email "actions@github.com"')
     os.system('git config --global user.name "GitHub Actions"')
     os.system(f'git add {STATE_FILE}')
     os.system('git commit -m "Update bot state"')
-    os.system('git push https://${{ secrets.PAT }}@github.com/${{ github.repository }}.git HEAD:main')
+    os.system(f'git push {repo_url} HEAD:main')
 
 # --- Trading Logic ---
 def execute_strategy():
