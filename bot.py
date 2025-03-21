@@ -104,12 +104,12 @@ def load_state():
 def save_state(state):
     with open(STATE_FILE, 'w') as f:
         json.dump(state, f)
-    # Commit state to GitHub (required for GitHub Actions)
+    # Commit and push using PAT for authentication
     os.system('git config --global user.email "actions@github.com"')
     os.system('git config --global user.name "GitHub Actions"')
-    os.system('git add bot_state.json')
+    os.system(f'git add {STATE_FILE}')
     os.system('git commit -m "Update bot state"')
-    os.system('git push')
+    os.system('git push https://${{ secrets.PAT }}@github.com/${{ github.repository }}.git HEAD:main')
 
 # --- Trading Logic ---
 def execute_strategy():
@@ -147,16 +147,6 @@ def execute_strategy():
 
     except Exception as e:
         print(f"[ERROR] {str(e)}")
-        
-def save_state(state):
-    with open(STATE_FILE, 'w') as f:
-        json.dump(state, f)
-    # Commit and push using PAT for authentication
-    os.system('git config --global user.email "actions@github.com"')
-    os.system('git config --global user.name "GitHub Actions"')
-    os.system(f'git add {STATE_FILE}')
-    os.system('git commit -m "Update bot state"')
-    os.system('git push https://${{ secrets.PAT }}@github.com/${{ github.repository }}.git HEAD:main')
     
 if __name__ == "__main__":
     execute_strategy()
