@@ -1,7 +1,7 @@
 name: Trading Bot
 on:
   schedule:
-    - cron: '*/30 * * * *'  # Runs every 30 minutes (UTC time)
+    - cron: '*/30 * * * *'  # Runs every 30 minutes
   workflow_dispatch:  # Allow manual runs
 
 jobs:
@@ -11,7 +11,8 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # Required to commit state changes
+          fetch-depth: 0
+          token: ${{ secrets.PAT }}  # Uses Personal Access Token (PAT)
 
       - name: Set up Python
         uses: actions/setup-python@v4
