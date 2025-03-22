@@ -1,8 +1,7 @@
 name: Trading Bot
 on:
   schedule:
-    # For UTC+7 (Jakarta), subtract 7 hours from desired time
-    - cron: '30 */23 * * *'  # Runs at :30 every hour YOUR TIME (e.g., 08:30 WIB = 01:30 UTC)
+    - cron: '*/30 * * * *'  # Runs every 30 minutes (UTC)
   workflow_dispatch:  # Allow manual runs
 
 jobs:
@@ -13,7 +12,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.PAT }}  # Uses Personal Access Token (PAT)
+          token: ${{ secrets.PAT }}
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -30,6 +29,6 @@ jobs:
           EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
           EMAIL_RECEIVER: ${{ secrets.EMAIL_RECEIVER }}
-          GITHUB_REPOSITORY: ${{ github.repository }}  # Add this line
-          PAT: ${{ secrets.PAT }}  # Add this line
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PAT: ${{ secrets.PAT }}
         run: python bot.py
