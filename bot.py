@@ -28,65 +28,6 @@ indodax = ccxt.indodax({
     'options': {'adjustForTimeDifference': True}
 })
 
-# --- UI Functions ---
-def print_header():
-    print("\n" + "=" * 40)
-    print(f" Indodax Trading Bot - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("=" * 40)
-
-def print_balance(balance):
-    print("[Account] Connected Successfully!")
-    print(f"  IDR Balance: {balance['IDR']['total']:,.0f}")
-    print(f"  BTC Balance: {balance['BTC']['total']:.6f}")
-    print("-" * 40)
-
-# --- Email Reporting ---
-def send_email(subject, body):
-    msg = MIMEText(body)
-    msg['Subject'] = subject
-    msg['From'] = EMAIL_SENDER
-    msg['To'] = EMAIL_RECEIVER
-
-    with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
-        server.login(EMAIL_SENDER, EMAIL_PASSWORD)
-        server.sendmail(EMAIL_SENDER, EMAIL_RECEIVER, msg.as_string())
-
-def calculate_pnl(initial_idr, current_idr, current_btc, btc_price):
-    current_value = current_idr + (current_btc * btc_price)
-    pnl_idr = current_value - initial_idr
-    pnl_percent = (pnl_idr / initial_idr) * 100
-    return pnl_idr, pnl_percent
-
-def check_report_due():
-    try:
-        with open(LAST_REPORT_FILE, 'r') as f:
-            last_report = datetime.fromisoformat(f.read().strip())
-    except FileNotFoundError:
-        last_report = datetime.now() - timedelta(days=REPORT_INTERVAL + 1)
-    
-    if (datetime.now() - last_report).days >= REPORT_INTERVAL:
-        return True
-    return False
-
-def generate_report(balance, btc_price):
-    state = load_state()
-    initial_idr = state.get('original_strategy_budget', balance['IDR']['total'] / 0.7 * 0.3)
-    current_idr = balance['IDR']['total']
-    current_btc = balance['BTC']['total']
-    
-    pnl_idr, pnl_percent = calculate_pnl(initial_idr, current_idr, current_btc, btc_price)
-    
-    report = f"""
-    Biweekly Trading Report
-    =======================
-    - Initial IDR: {initial_idr:,.0f}
-    - Current IDR: {current_idr:,.0f}
-    - BTC Holdings: {current_btc:.6f} (Value: {current_btc * btc_price:,.0f} IDR)
-    - P&L (IDR): {pnl_idr:+,.0f}
-    - P&L (%): {pnl_percent:+.2f}%
-    """
-    return report
-
 # --- State Management ---
 def load_state():
     try:
@@ -98,13 +39,20 @@ def load_state():
             'remaining_budget': None,
             'last_purchase_price': None,
             'highest_price': None,
-            'trailing_active': False
+            'trailing_active': False,
+            'total_trades': 0,
+            'winning_trades': 0,
+            'max_drawdown': 0.0,
+            'trade_history': [],
+            'total_idr_spent': 0.0,
+            'realized_pnl': 0.0,
+            'equity_peak': 0.0  # Track for drawdown calculation
         }
 
 def save_state(state):
     with open(STATE_FILE, 'w') as f:
         json.dump(state, f)
-    # Use environment variables for GitHub repository and PAT
+    # Push state to GitHub
     repo_url = f"https://{os.environ['PAT']}@github.com/{os.environ['GITHUB_REPOSITORY']}.git"
     os.system('git config --global user.email "actions@github.com"')
     os.system('git config --global user.name "GitHub Actions"')
@@ -112,42 +60,115 @@ def save_state(state):
     os.system('git commit -m "Update bot state"')
     os.system(f'git push {repo_url} HEAD:main')
 
+# --- Email Reporting ---
+def send_email(subject, body):
+    msg = MIMEText(body)
+    msg['Subject'] = subject
+    msg['From'] = EMAIL_SENDER
+    msg['To'] = EMAIL_RECEIVER
+    with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
+        server.login(EMAIL_SENDER, EMAIL_PASSWORD)
+        server.sendmail(EMAIL_SENDER, EMAIL_RECEIVER, msg.as_string())
+
+def generate_report(balance, btc_price, state):
+    initial_idr = state['original_strategy_budget']
+    current_idr = balance['IDR']['total']
+    current_btc = balance['BTC']['total']
+    current_value = current_idr + (current_btc * btc_price)
+    
+    # Realized P&L
+    realized_pnl = state['realized_pnl']
+    realized_pnl_percent = (realized_pnl / initial_idr) * 100 if initial_idr != 0 else 0
+    
+    # Unrealized P&L
+    unrealized_pnl = (current_btc * btc_price) - (state['total_idr_spent'] - state['realized_pnl'])
+    unrealized_pnl_percent = (unrealized_pnl / initial_idr) * 100 if initial_idr != 0 else 0
+    
+    # Win Rate
+    win_rate = (state['winning_trades'] / state['total_trades']) * 100 if state['total_trades'] > 0 else 0
+    
+    # Trade History (last 5 trades)
+    recent_trades = "\n".join(
+        [f"- {trade['date']}: {trade['type'].upper()} {trade['amount']:.5f} BTC @ {trade['price']:,.0f} IDR" 
+         for trade in state['trade_history'][-5:]]
+    )
+
+    report = f"""
+    📈 Biweekly Trading Report
+    =========================
+    - Initial Balance: {initial_idr:,.0f} IDR
+    - Current Balance: {current_value:,.0f} IDR
+    - Realized P&L: {realized_pnl:+,.0f} IDR ({realized_pnl_percent:+.2f}%)
+    - Unrealized P&L: {unrealized_pnl:+,.0f} IDR ({unrealized_pnl_percent:+.2f}%)
+
+    🔍 Key Metrics
+    -------------
+    - Total Trades: {state['total_trades']}
+    - Win Rate: {win_rate:.1f}%
+    - Max Drawdown: {state['max_drawdown']:.1f}%
+
+    📉 Market Snapshot
+    -----------------
+    - BTC Price: {btc_price:,.0f} IDR
+    - Next Buy Trigger: {state['last_purchase_price'] * 0.9:,.0f} IDR (-10%)
+
+    📅 Recent Trades
+    ----------------
+    {recent_trades if recent_trades else "No trades this period."}
+    """
+    return report
+
 # --- Trading Logic ---
 def execute_strategy():
-    print_header()
+    print("\n" + "=" * 40)
+    print(f" Indodax Trading Bot - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("=" * 40)
+    
     try:
         balance = indodax.fetch_balance()
-        print_balance(balance)
         state = load_state()
+        ticker = indodax.fetch_ticker('BTC/IDR')
+        current_price = ticker['last']
 
         # Initialize strategy budget
         if state['original_strategy_budget'] is None:
-            idr_total = balance['IDR']['total']
-            state['original_strategy_budget'] = idr_total * 0.7
+            state['original_strategy_budget'] = balance['IDR']['total'] * 0.7
             state['remaining_budget'] = state['original_strategy_budget'] * 0.5
-            state['last_purchase_price'] = None
-            state['highest_price'] = None
-            state['trailing_active'] = False
+            state['equity_peak'] = state['original_strategy_budget']
             save_state(state)
             print("[STATUS] Strategy initialized!")
 
-        # Fetch price and execute logic
-        ticker = indodax.fetch_ticker('BTC/IDR')
-        current_price = ticker['last']
-        print(f"[PRICE] Current BTC/IDR: {current_price:,.0f}")
-
-        # Buy/Sell logic (same as previous code)
-        # ... [Insert your buy/sell logic here] ...
+        # --- Buy/Sell Logic (simplified) ---
+        # ... (your existing buy/sell logic here)
+        # After each trade, update state:
+        # state['total_trades'] += 1
+        # state['trade_history'].append({'date': datetime.now().isoformat(), 'type': 'buy/sell', 'amount': ..., 'price': ...})
+        
+        # Calculate drawdown
+        current_equity = balance['IDR']['total'] + (balance['BTC']['total'] * current_price)
+        drawdown = ((state['equity_peak'] - current_equity) / state['equity_peak']) * 100
+        state['max_drawdown'] = max(state['max_drawdown'], drawdown)
+        state['equity_peak'] = max(state['equity_peak'], current_equity)
 
         # Send biweekly report
         if check_report_due():
-            report = generate_report(balance, current_price)
+            report = generate_report(balance, current_price, state)
             send_email("Indodax Biweekly Report", report)
             with open(LAST_REPORT_FILE, 'w') as f:
                 f.write(datetime.now().isoformat())
+        
+        save_state(state)
 
     except Exception as e:
         print(f"[ERROR] {str(e)}")
-    
+
+def check_report_due():
+    try:
+        with open(LAST_REPORT_FILE, 'r') as f:
+            last_report = datetime.fromisoformat(f.read().strip())
+    except FileNotFoundError:
+        last_report = datetime.now() - timedelta(days=REPORT_INTERVAL + 1)
+    return (datetime.now() - last_report).days >= REPORT_INTERVAL
+
 if __name__ == "__main__":
     execute_strategy()
