@@ -9,10 +9,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # --- Configuration ---
-DRY_RUN = False
+DRY_RUN = False  # Set to True for testing
 STATE_FILE = 'bot_state.json'
 MIN_BTC_ORDER = 0.000001
-REPORT_INTERVAL = 14  # Days between reports
+REPORT_INTERVAL = 14
 LAST_REPORT_FILE = 'last_report.txt'
 
 # Email settings
@@ -141,7 +141,7 @@ def execute_strategy():
     print("=" * 40)
     
     try:
-        # Fetch market data
+        # Fetch data
         balance = indodax.fetch_balance()
         ticker = indodax.fetch_ticker('BTC/IDR')
         current_price = ticker.get('last', 0)
@@ -163,19 +163,105 @@ def execute_strategy():
         drawdown = ((state['equity_peak'] - current_equity) / state['equity_peak']) * 100 if state['equity_peak'] else 0
         state['max_drawdown'] = max(state.get('max_drawdown', 0), drawdown)
 
-        # --- Your Buy/Sell Logic Here ---
-        # Example buy logic:
-        if state['last_purchase_price'] is None:
-            # Initial buy
-            pass
+        # --- Trading Strategy ---
+        # Initial Buy (50% of strategy budget)
+        if state['last_purchase_price'] is None and state['remaining_budget'] > 0:
+            buy_amount = state['remaining_budget']
+            btc_amount = buy_amount / current_price
+            if btc_amount >= MIN_BTC_ORDER:
+                print(f"[BUY] Purchasing {btc_amount:.6f} BTC ({buy_amount:,.0f} IDR)")
+                if not DRY_RUN:
+                    indodax.create_order(
+                        symbol='BTC/IDR',
+                        type='market',
+                        side='buy',
+                        amount=None,
+                        price=current_price,
+                        params={'idr': buy_amount}
+                    )
+                state.update({
+                    'last_purchase_price': current_price,
+                    'total_idr_spent': buy_amount,
+                    'total_trades': state['total_trades'] + 1,
+                    'trade_history': state['trade_history'] + [{
+                        'date': datetime.now().isoformat(),
+                        'type': 'buy',
+                        'amount': btc_amount,
+                        'price': current_price
+                    }]
+                })
+        else:
+            # DCA Buy (10% price drop)
+            price_drop = (state['last_purchase_price'] - current_price) / state['last_purchase_price']
+            if price_drop >= 0.1 and state['remaining_budget'] > 0:
+                buy_amount = state['remaining_budget'] * 0.5
+                btc_amount = buy_amount / current_price
+                if btc_amount >= MIN_BTC_ORDER:
+                    print(f"[DCA BUY] Purchasing {btc_amount:.6f} BTC ({buy_amount:,.0f} IDR)")
+                    if not DRY_RUN:
+                        indodax.create_order(
+                            symbol='BTC/IDR',
+                            type='market',
+                            side='buy',
+                            amount=None,
+                            price=current_price,
+                            params={'idr': buy_amount}
+                        )
+                    state.update({
+                        'remaining_budget': state['remaining_budget'] * 0.5,
+                        'last_purchase_price': current_price,
+                        'total_idr_spent': state['total_idr_spent'] + buy_amount,
+                        'total_trades': state['total_trades'] + 1,
+                        'trade_history': state['trade_history'] + [{
+                            'date': datetime.now().isoformat(),
+                            'type': 'buy',
+                            'amount': btc_amount,
+                            'price': current_price
+                        }]
+                    })
 
-        # Send biweekly report
+            # Trailing Stop-Loss
+            if state['trailing_active']:
+                state['highest_price'] = max(state.get('highest_price', 0), current_price)
+                trailing_stop = state['highest_price'] * 0.97
+                if current_price <= trailing_stop:
+                    btc_balance = balance.get('BTC', {}).get('total', 0)
+                    if btc_balance >= MIN_BTC_ORDER:
+                        print(f"[SELL] Selling {btc_balance:.6f} BTC")
+                        if not DRY_RUN:
+                            indodax.create_order(
+                                symbol='BTC/IDR',
+                                type='market',
+                                side='sell',
+                                amount=btc_balance,
+                                price=current_price,
+                                params={'btc': btc_balance}
+                            )
+                        realized_profit = (btc_balance * current_price) - state['total_idr_spent']
+                        state.update({
+                            'realized_pnl': state['realized_pnl'] + realized_profit,
+                            'total_trades': state['total_trades'] + 1,
+                            'winning_trades': state['winning_trades'] + (1 if realized_profit > 0 else 0),
+                            'trade_history': state['trade_history'] + [{
+                                'date': datetime.now().isoformat(),
+                                'type': 'sell',
+                                'amount': btc_balance,
+                                'price': current_price
+                            }],
+                            'remaining_budget': None,
+                            'last_purchase_price': None,
+                            'trailing_active': False
+                        })
+            elif current_price >= state['last_purchase_price'] * 1.08:
+                state['trailing_active'] = True
+                state['highest_price'] = current_price
+
+        # Send report & save state
         if check_report_due():
             report = generate_report(balance, current_price, state)
-            send_email("Indodax Biweekly Trading Report", report)
+            send_email("Indodax Biweekly Report", report)
             with open(LAST_REPORT_FILE, 'w') as f:
                 f.write(datetime.now().isoformat())
-
         save_state(state)
         print("Operation completed successfully")
 
