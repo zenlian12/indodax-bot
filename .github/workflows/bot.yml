@@ -1,7 +1,8 @@
 name: Trading Bot
 on:
   schedule:
-    - cron: '*/30 * * * *'  # Runs every 30 minutes
+    # For UTC+7 (Jakarta), subtract 7 hours from desired time
+    - cron: '30 */23 * * *'  # Runs at :30 every hour YOUR TIME (e.g., 08:30 WIB = 01:30 UTC)
   workflow_dispatch:  # Allow manual runs
 
 jobs:
