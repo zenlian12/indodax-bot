@@ -72,9 +72,10 @@ def send_email(subject, body):
         server.sendmail(EMAIL_SENDER, EMAIL_RECEIVER, msg.as_string())
 
 def generate_report(balance, btc_price, state):
+    # Handle None values gracefully
     initial_idr = state['original_strategy_budget'] or 0
-    current_idr = balance['IDR']['total'] or 0
-    current_btc = balance['BTC']['total'] or 0
+    current_idr = balance.get('IDR', {}).get('total', 0) or 0
+    current_btc = balance.get('BTC', {}).get('total', 0) or 0
     current_value = current_idr + (current_btc * btc_price)
 
     # Realized P&L
@@ -82,7 +83,8 @@ def generate_report(balance, btc_price, state):
     realized_pnl_percent = (realized_pnl / initial_idr * 100) if initial_idr else 0
 
     # Unrealized P&L
-    unrealized_pnl = (current_btc * btc_price) - (state['total_idr_spent'] - realized_pnl)
+    total_spent = state['total_idr_spent'] or 0
+    unrealized_pnl = (current_btc * btc_price) - (total_spent - realized_pnl)
     unrealized_pnl_percent = (unrealized_pnl / initial_idr * 100) if initial_idr else 0
 
     # Win Rate
@@ -91,10 +93,15 @@ def generate_report(balance, btc_price, state):
 
     # Trade History
     recent_trades = "\n".join(
-        [f"- {trade['date'][:10]}: {trade['type'].upper()} {trade['amount']:.5f} BTC @ {trade['price']:,.0f} IDR"
+        [f"- {trade.get('date', '')[:10]}: {trade.get('type', '').upper()} "
+         f"{trade.get('amount', 0):.5f} BTC @ {trade.get('price', 0):,.0f} IDR"
          for trade in state['trade_history'][-3:]]
     ) if state['trade_history'] else "No recent trades"
 
+    # Next Buy Trigger
+    last_price = state['last_purchase_price'] or 0
+    next_buy_trigger = last_price * 0.9 if last_price else "N/A (first buy pending)"
+    
     return f"""
     📈 Biweekly Trading Report
     =========================
@@ -107,12 +114,12 @@ def generate_report(balance, btc_price, state):
     ---------------------
     - Total Trades: {total_trades}
     - Win Rate: {win_rate:.1f}%
-    - Max Drawdown: {state['max_drawdown']:.1f}%
+    - Max Drawdown: {state.get('max_drawdown', 0):.1f}%
 
     💹 Market Overview
     -----------------
     - Current BTC Price: {btc_price:,.0f} IDR
-    - Next Buy Trigger: {state['last_purchase_price'] * 0.9:,.0f} IDR (if applicable)
+    - Next Buy Trigger: {next_buy_trigger if isinstance(next_buy_trigger, str) else f'{next_buy_trigger:,.0f} IDR (-10%)'}
 
     📆 Recent Activity
     -----------------
@@ -137,26 +144,30 @@ def execute_strategy():
         # Fetch market data
         balance = indodax.fetch_balance()
         ticker = indodax.fetch_ticker('BTC/IDR')
-        current_price = ticker['last']
+        current_price = ticker.get('last', 0)
         
         state = load_state()
 
         # Initialize strategy
         if state['original_strategy_budget'] is None:
-            state['original_strategy_budget'] = balance['IDR']['total'] * 0.7
+            state['original_strategy_budget'] = balance.get('IDR', {}).get('total', 0) * 0.7
             state['remaining_budget'] = state['original_strategy_budget'] * 0.5
+            state['last_purchase_price'] = None
             state['equity_peak'] = state['original_strategy_budget']
             save_state(state)
             print("[STATUS] Strategy initialized!")
 
         # Update equity tracking
-        current_equity = balance['IDR']['total'] + (balance['BTC']['total'] * current_price)
-        state['equity_peak'] = max(state['equity_peak'] or 0, current_equity)
-        drawdown = ((state['equity_peak'] - current_equity) / state['equity_peak']) * 100
-        state['max_drawdown'] = max(state['max_drawdown'], drawdown)
+        current_equity = balance.get('IDR', {}).get('total', 0) + (balance.get('BTC', {}).get('total', 0) * current_price)
+        state['equity_peak'] = max(state.get('equity_peak', 0), current_equity)
+        drawdown = ((state['equity_peak'] - current_equity) / state['equity_peak']) * 100 if state['equity_peak'] else 0
+        state['max_drawdown'] = max(state.get('max_drawdown', 0), drawdown)
 
-        # --- Buy/Sell Logic ---
-        # [Your existing trading strategy implementation here]
+        # --- Your Buy/Sell Logic Here ---
+        # Example buy logic:
+        if state['last_purchase_price'] is None:
+            # Initial buy
+            pass
 
         # Send biweekly report
         if check_report_due():
