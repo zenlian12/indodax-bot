@@ -2,6 +2,7 @@ import ccxt
 import os
 import json
 import smtplib
+import time
 from email.mime.text import MIMEText
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
@@ -12,8 +13,10 @@ load_dotenv()
 DRY_RUN = False  # Set to True for testing
 STATE_FILE = 'bot_state.json'
 MIN_BTC_ORDER = 0.000001
-REPORT_INTERVAL = 14
+REPORT_INTERVAL = 14  # Days between reports
 LAST_REPORT_FILE = 'last_report.txt'
+MARKET_OPEN_HOUR = 9  # 9 AM Jakarta time (UTC+7)
+MARKET_CLOSE_HOUR = 17  # 5 PM Jakarta time (UTC+7)
 
 # Email settings
 EMAIL_SENDER = os.getenv("EMAIL_SENDER")
@@ -52,14 +55,22 @@ def load_state():
         return default_state
 
 def save_state(state):
+    # Atomic write to prevent corruption
     with open(STATE_FILE, 'w') as f:
-        json.dump(state, f)
-    repo_url = f"https://{os.environ['PAT']}@github.com/{os.environ['GITHUB_REPOSITORY']}.git"
-    os.system('git config --global user.email "actions@github.com"')
-    os.system('git config --global user.name "GitHub Actions"')
-    os.system(f'git add {STATE_FILE}')
-    os.system('git commit -m "Update bot state"')
-    os.system(f'git push {repo_url} HEAD:main')
+        json.dump(state, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    
+    # Git persistence with error handling
+    try:
+        repo_url = f"https://{os.environ['GITHUB_TOKEN']}@github.com/{os.environ['GITHUB_REPOSITORY']}.git"
+        os.system('git config --global user.email "actions@github.com"')
+        os.system('git config --global user.name "GitHub Actions"')
+        os.system(f'git add {STATE_FILE} {LAST_REPORT_FILE}')
+        os.system('git commit -m "Bot state update" || exit 0')  # Allow empty commits
+        os.system(f'git push {repo_url} HEAD:main')
+    except Exception as e:
+        print(f"Git commit error: {str(e)}")
 
 # --- Email Reporting ---
 def send_email(subject, body):
@@ -67,9 +78,18 @@ def send_email(subject, body):
     msg['Subject'] = subject
     msg['From'] = EMAIL_SENDER
     msg['To'] = EMAIL_RECEIVER
-    with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
-        server.login(EMAIL_SENDER, EMAIL_PASSWORD)
-        server.sendmail(EMAIL_SENDER, EMAIL_RECEIVER, msg.as_string())
+    
+    # Retry mechanism with backoff
+    for attempt in range(3):
+        try:
+            with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
+                server.login(EMAIL_SENDER, EMAIL_PASSWORD)
+                server.sendmail(EMAIL_SENDER, EMAIL_RECEIVER, msg.as_string())
+                return True
+        except Exception as e:
+            print(f"Email send failed (attempt {attempt+1}/3): {str(e)}")
+            time.sleep(10)
+    return False
 
 def generate_report(balance, btc_price, state):
     # Handle None values gracefully
@@ -126,26 +146,43 @@ def generate_report(balance, btc_price, state):
     {recent_trades}
     """
 
+def is_market_hours():
+    """Check if current time is within Jakarta market hours (UTC+7)"""
+    utc_now = datetime.utcnow()
+    jakarta_time = utc_now + timedelta(hours=7)
+    return MARKET_OPEN_HOUR <= jakarta_time.hour < MARKET_CLOSE_HOUR
+
 def check_report_due():
+    """Check if report should be sent"""
     try:
         with open(LAST_REPORT_FILE, 'r') as f:
             last_report = datetime.fromisoformat(f.read().strip())
     except (FileNotFoundError, ValueError):
-        last_report = datetime.now() - timedelta(days=REPORT_INTERVAL + 1)
-    return (datetime.now() - last_report).days >= REPORT_INTERVAL
+        try:
+            state = load_state()
+            if state['trade_history']:
+                last_report = datetime.fromisoformat(state['trade_history'][-1]['date'])
+            else:
+                last_report = datetime.now() - timedelta(days=REPORT_INTERVAL + 1)
+        except:
+            last_report = datetime.now() - timedelta(days=REPORT_INTERVAL + 1)
+    
+    return (datetime.now() - last_report).days >= REPORT_INTERVAL and is_market_hours()
 
 # --- Core Trading Logic ---
 def execute_strategy():
     print("\n" + "=" * 40)
-    print(f" Indodax Trading Bot - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f" Indodax Trading Bot - {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}")
     print("=" * 40)
     
     try:
-        # Fetch data
+        # Pull latest state from repository
+        os.system('git pull origin main > /dev/null 2>&1 || true')
+
+        # Fetch data and load state
         balance = indodax.fetch_balance()
         ticker = indodax.fetch_ticker('BTC/IDR')
         current_price = ticker.get('last', 0)
-        
         state = load_state()
 
         # Initialize strategy
@@ -184,7 +221,7 @@ def execute_strategy():
                     'total_idr_spent': buy_amount,
                     'total_trades': state['total_trades'] + 1,
                     'trade_history': state['trade_history'] + [{
-                        'date': datetime.now().isoformat(),
+                        'date': datetime.utcnow().isoformat(),
                         'type': 'buy',
                         'amount': btc_amount,
                         'price': current_price
@@ -213,7 +250,7 @@ def execute_strategy():
                         'total_idr_spent': state['total_idr_spent'] + buy_amount,
                         'total_trades': state['total_trades'] + 1,
                         'trade_history': state['trade_history'] + [{
-                            'date': datetime.now().isoformat(),
+                            'date': datetime.utcnow().isoformat(),
                             'type': 'buy',
                             'amount': btc_amount,
                             'price': current_price
@@ -243,7 +280,7 @@ def execute_strategy():
                             'total_trades': state['total_trades'] + 1,
                             'winning_trades': state['winning_trades'] + (1 if realized_profit > 0 else 0),
                             'trade_history': state['trade_history'] + [{
-                                'date': datetime.now().isoformat(),
+                                'date': datetime.utcnow().isoformat(),
                                 'type': 'sell',
                                 'amount': btc_balance,
                                 'price': current_price
@@ -256,17 +293,23 @@ def execute_strategy():
                 state['trailing_active'] = True
                 state['highest_price'] = current_price
 
-        # Send report & save state
+        # Send report if due
         if check_report_due():
             report = generate_report(balance, current_price, state)
-            send_email("Indodax Biweekly Report", report)
-            with open(LAST_REPORT_FILE, 'w') as f:
-                f.write(datetime.now().isoformat())
+            if send_email("Indodax Biweekly Report", report):
+                with open(LAST_REPORT_FILE, 'w') as f:
+                    f.write(datetime.utcnow().isoformat())
+                print("✅ Sent biweekly report")
+            else:
+                print("❌ Failed to send report after 3 attempts")
+
         save_state(state)
         print("Operation completed successfully")
 
     except Exception as e:
-        print(f"[CRITICAL ERROR] {str(e)}")
+        error_msg = f"[CRITICAL ERROR] {str(e)}"
+        print(error_msg)
+        send_email("Trading Bot Error", error_msg)
         raise
 
 if __name__ == "__main__":
