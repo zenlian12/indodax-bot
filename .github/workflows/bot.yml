@@ -31,4 +31,10 @@ jobs:
           EMAIL_RECEIVER: ${{ secrets.EMAIL_RECEIVER }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           PAT: ${{ secrets.PAT }}
+          
+      - name: Pull existing state
+        run: |
+          git config --global pull.rebase true
+          git pull origin main   
+          
         run: python bot.py
