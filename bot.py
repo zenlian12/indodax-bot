@@ -5,218 +5,262 @@ import smtplib
 from email.mime.text import MIMEText
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
+import logging
+from decimal import Decimal, getcontext
 
 load_dotenv()
+getcontext().prec = 8  # For precise BTC calculations
 
 # --- Configuration ---
-DRY_RUN = False  # Set to True for testing
-TAKE_PROFIT = 0.06  # 6% take-profit
-DCA_DROP = 0.10     # 10% drop for DCA buys
+DRY_RUN = False
+TAKE_PROFIT = 0.06
+DCA_DROP = 0.10
 STATE_FILE = 'bot_state.json'
-MIN_BTC_ORDER = 0.000001
-REPORT_INTERVAL = 14
-LAST_REPORT_FILE = 'last_report.txt'
+MIN_BTC_ORDER = Decimal('0.000001')
+REPORT_INTERVAL = 14  # Days
+LOG_FILE = 'bot.log'
 
-# Email settings
-EMAIL_SENDER = os.getenv("EMAIL_SENDER")
-EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
-EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
+# Security: Removed git operations and use local state management
+# Added logging configuration
+logging.basicConfig(
+    filename=LOG_FILE,
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 
-# Initialize exchange
+# Initialize exchange with timeout
 indodax = ccxt.indodax({
     'apiKey': os.getenv("INDODAX_API_KEY"),
     'secret': os.getenv("INDODAX_SECRET_KEY"),
     'enableRateLimit': True,
+    'timeout': 30000,
     'options': {'adjustForTimeDifference': True}
 })
 
 # --- State Management ---
 def load_state():
     default_state = {
-        'original_strategy_budget': None,
+        'original_budget': None,
         'remaining_budget': None,
+        'total_btc': Decimal('0'),
+        'total_idr_spent': Decimal('0'),
         'purchase_prices': [],
-        'total_btc': 0.0,
-        'total_trades': 0,
-        'winning_trades': 0,
-        'max_drawdown': 0.0,
         'trade_history': [],
-        'total_idr_spent': 0.0,
-        'realized_pnl': 0.0,
-        'equity_peak': None
+        'realized_pnl': Decimal('0'),
+        'last_report': None
     }
-    try:
+    
+    if os.path.exists(STATE_FILE):
         with open(STATE_FILE, 'r') as f:
             saved_state = json.load(f)
-            return {**default_state, **saved_state}
-    except (FileNotFoundError, json.JSONDecodeError):
-        return default_state
+            # Convert numeric values to Decimal
+            return {
+                **default_state,
+                'original_budget': Decimal(str(saved_state.get('original_budget', 0))),
+                'remaining_budget': Decimal(str(saved_state.get('remaining_budget', 0))),
+                'total_btc': Decimal(str(saved_state.get('total_btc', 0))),
+                'total_idr_spent': Decimal(str(saved_state.get('total_idr_spent', 0))),
+                'purchase_prices': saved_state.get('purchase_prices', []),
+                'trade_history': saved_state.get('trade_history', []),
+                'realized_pnl': Decimal(str(saved_state.get('realized_pnl', 0))),
+                'last_report': saved_state.get('last_report')
+            }
+    return default_state
 
 def save_state(state):
+    serializable_state = {
+        'original_budget': str(state['original_budget']),
+        'remaining_budget': str(state['remaining_budget']),
+        'total_btc': str(state['total_btc']),
+        'total_idr_spent': str(state['total_idr_spent']),
+        'purchase_prices': state['purchase_prices'],
+        'trade_history': state['trade_history'],
+        'realized_pnl': str(state['realized_pnl']),
+        'last_report': state['last_report']
+    }
+    
     with open(STATE_FILE, 'w') as f:
-        json.dump(state, f)
-    repo_url = f"https://{os.environ['PAT']}@github.com/{os.environ['GITHUB_REPOSITORY']}.git"
-    os.system('git config --global user.email "actions@github.com"')
-    os.system('git config --global user.name "GitHub Actions"')
-    os.system(f'git add {STATE_FILE}')
-    os.system('git commit -m "Update bot state"')
-    os.system(f'git push {repo_url} HEAD:main')
-
-# --- Email Reporting ---
-def send_email(subject, body):
-    msg = MIMEText(body)
-    msg['Subject'] = subject
-    msg['From'] = EMAIL_SENDER
-    msg['To'] = EMAIL_RECEIVER
-    with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
-        server.login(EMAIL_SENDER, EMAIL_PASSWORD)
-        server.sendmail(EMAIL_SENDER, EMAIL_RECEIVER, msg.as_string())
-
-def generate_report(balance, btc_price, state):
-    avg_price = sum(state['purchase_prices'])/len(state['purchase_prices']) if state['purchase_prices'] else 0
-    current_idr = balance.get('IDR', {}).get('total', 0) or 0
-    current_btc = balance.get('BTC', {}).get('total', 0) or 0
-    current_value = current_idr + (current_btc * btc_price)
-
-    realized_pnl = state['realized_pnl'] or 0
-    unrealized_pnl = (current_btc * btc_price) - (state['total_idr_spent'] - realized_pnl)
-
-    return f"""
-    📈 Biweekly Trading Report
-    =========================
-    - Strategy Budget: {state['original_strategy_budget']:,.0f} IDR
-    - Current Value: {current_value:,.0f} IDR
-    - Avg Purchase Price: {avg_price:,.0f} IDR
-    - Realized P&L: {realized_pnl:+,.0f} IDR
-    - Unrealized P&L: {unrealized_pnl:+,.0f} IDR
-    - Total Trades: {state['total_trades']}
-    - Next Buy Trigger: {state['purchase_prices'][-1]*0.9 if state['purchase_prices'] else 'N/A':,.0f} IDR
-    """
-
-def check_report_due():
-    try:
-        os.system('git pull origin main > /dev/null 2>&1')
-        with open(LAST_REPORT_FILE, 'r') as f:
-            last_report = datetime.fromisoformat(f.read().strip())
-    except (FileNotFoundError, ValueError):
-        last_report = datetime.now() - timedelta(days=REPORT_INTERVAL + 1)
-    return (datetime.now() - last_report).total_seconds() >= 1209600
+        json.dump(serializable_state, f, indent=2)
 
 # --- Core Trading Logic ---
 def execute_strategy():
-    print("\n" + "=" * 40)
-    print(f" Indodax Trading Bot - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("=" * 40)
-    
+    logging.info("Starting execution cycle")
     try:
         balance = indodax.fetch_balance()
         ticker = indodax.fetch_ticker('BTC/IDR')
-        current_price = ticker.get('last', 0)
+        current_price = Decimal(str(ticker['last']))
         state = load_state()
 
-        # Initialize strategy (first run or after sell)
+        # Initialize strategy
         if not state['purchase_prices'] and state['remaining_budget'] is None:
-            state['original_strategy_budget'] = balance['IDR']['total'] * 0.7
-            state['remaining_budget'] = state['original_strategy_budget'] * 0.5
+            idr_balance = Decimal(str(balance['IDR']['total']))
+            state['original_budget'] = idr_balance * Decimal('0.7')
+            state['remaining_budget'] = state['original_budget'] * Decimal('0.5')
+            save_state(state)
+            logging.info(f"Initialized with budget: {state['remaining_budget']} IDR")
+
+        # Calculate correct average price
+        avg_price = (state['total_idr_spent'] / state['total_btc']) if state['total_btc'] else Decimal('0')
+        
+        # Buy/Sell logic
+        handle_initial_buy(balance, current_price, state)
+        handle_take_profit(current_price, avg_price, balance, state)
+        handle_dca_buy(current_price, state, balance)
+        
+        # Reporting
+        handle_reporting(balance, current_price, state)
+
+        logging.info("Execution completed successfully")
+        
+    except ccxt.NetworkError as e:
+        logging.error(f"Network error: {str(e)}")
+    except ccxt.ExchangeError as e:
+        logging.error(f"Exchange error: {str(e)}")
+    except Exception as e:
+        logging.error(f"Unexpected error: {str(e)}", exc_info=True)
+    finally:
+        if 'state' in locals():
             save_state(state)
 
-        # Calculate average purchase price
-        avg_price = sum(state['purchase_prices'])/len(state['purchase_prices']) if state['purchase_prices'] else 0
+def handle_initial_buy(balance, current_price, state):
+    if not state['purchase_prices'] and state['remaining_budget'] > 0:
+        idr_available = Decimal(str(balance['IDR']['free']))
+        buy_amount = min(state['remaining_budget'], idr_available)
+        btc_amount = buy_amount / current_price
+        
+        if btc_amount >= MIN_BTC_ORDER:
+            logging.info(f"Executing initial buy: {btc_amount:.8f} BTC @ {current_price}")
+            if not DRY_RUN:
+                order = indodax.create_market_buy_order(
+                    'BTC/IDR',
+                    float(btc_amount),
+                    params={'cost': float(buy_amount)}
+                )
+                # Verify order execution
+                if order['status'] != 'closed':
+                    logging.warning("Order not filled completely")
+                    return
+            
+            state['purchase_prices'].append(float(current_price))
+            state['total_btc'] += btc_amount
+            state['total_idr_spent'] += buy_amount
+            state['remaining_budget'] -= buy_amount
+            state['trade_history'].append({
+                'type': 'buy',
+                'amount': float(btc_amount),
+                'price': float(current_price),
+                'timestamp': datetime.now().isoformat()
+            })
+            logging.info(f"Updated state: {state}")
 
-        # Initial Buy (first purchase in cycle)
-        if not state['purchase_prices'] and state['remaining_budget'] > 0:
-            buy_amount = min(state['remaining_budget'], balance['IDR']['free'])
-            btc_amount = round(buy_amount / current_price, 8)  # FIXED: Rounded to 8 decimals
+def handle_take_profit(current_price, avg_price, balance, state):
+    if state['total_btc'] > 0 and current_price >= avg_price * (1 + Decimal(str(TAKE_PROFIT))):
+        btc_balance = Decimal(str(balance['BTC']['free']))
+        sell_amount = min(state['total_btc'], btc_balance)
+        
+        if sell_amount >= MIN_BTC_ORDER:
+            logging.info(f"Take profit triggered: Selling {sell_amount:.8f} BTC @ {current_price}")
+            if not DRY_RUN:
+                order = indodax.create_market_sell_order(
+                    'BTC/IDR',
+                    float(sell_amount)
+                )
+                # Calculate actual proceeds
+                proceeds = Decimal(str(order['cost']))
+            
+            realized_profit = proceeds - state['total_idr_spent']
+            state['realized_pnl'] += realized_profit
+            state['remaining_budget'] = Decimal(str(balance['IDR']['total'])) * Decimal('0.7') * Decimal('0.5')
+            state['purchase_prices'] = []
+            state['total_btc'] = Decimal('0')
+            state['total_idr_spent'] = Decimal('0')
+            state['trade_history'].append({
+                'type': 'sell',
+                'amount': float(sell_amount),
+                'price': float(current_price),
+                'profit': float(realized_profit),
+                'timestamp': datetime.now().isoformat()
+            })
+            logging.info(f"Reset state for new cycle. New budget: {state['remaining_budget']}")
+
+def handle_dca_buy(current_price, state, balance):
+    if state['purchase_prices']:
+        last_price = Decimal(str(state['purchase_prices'][-1]))
+        price_drop = (last_price - current_price) / last_price
+        
+        if price_drop >= DCA_DROP:
+            idr_available = Decimal(str(balance['IDR']['free']))
+            buy_amount = min(state['remaining_budget'] * Decimal('0.5'), idr_available)
+            btc_amount = buy_amount / current_price
             
             if btc_amount >= MIN_BTC_ORDER:
-                print(f"[INITIAL BUY] Buying {btc_amount:.8f} BTC @ {current_price:,.0f} IDR")  # FIXED: .8f
+                logging.info(f"DCA buy triggered: {btc_amount:.8f} BTC @ {current_price}")
                 if not DRY_RUN:
-                    indodax.create_order(
-                        symbol='BTC/IDR',
-                        type='market',
-                        side='buy',
-                        amount=btc_amount,
-                        price=current_price,
-                        params={'idr': buy_amount}
+                    order = indodax.create_market_buy_order(
+                        'BTC/IDR',
+                        float(btc_amount),
+                        params={'cost': float(buy_amount)}
                     )
-                state['purchase_prices'].append(current_price)
+                    # Verify execution
+                    if order['status'] != 'closed':
+                        logging.warning("DCA order not filled completely")
+                        return
+                
+                state['purchase_prices'].append(float(current_price))
                 state['total_btc'] += btc_amount
                 state['total_idr_spent'] += buy_amount
                 state['remaining_budget'] -= buy_amount
-                state['total_trades'] += 1
-                save_state(state)
+                state['trade_history'].append({
+                    'type': 'dca_buy',
+                    'amount': float(btc_amount),
+                    'price': float(current_price),
+                    'timestamp': datetime.now().isoformat()
+                })
 
-        # --- Take Profit Check (6% from average) ---
-        if state['purchase_prices'] and current_price >= avg_price * (1 + TAKE_PROFIT):
-            btc_to_sell = round(state['total_btc'], 8)  # FIXED: Rounded to 8 decimals
-            print(f"[SELL] 6% profit reached (Avg: {avg_price:,.0f} IDR, Current: {current_price:,.0f} IDR)")
-            if not DRY_RUN:
-                indodax.create_order(
-                    symbol='BTC/IDR',
-                    type='market',
-                    side='sell',
-                    amount=btc_to_sell,
-                    price=current_price,
-                    params={'btc': btc_to_sell}  # FIXED: Rounded value
-                )
-            profit = (current_price * btc_to_sell) - state['total_idr_spent']
-            state.update({
-                'realized_pnl': state['realized_pnl'] + profit,
-                'total_idr_spent': 0.0,
-                'winning_trades': state['winning_trades'] + (1 if profit > 0 else 0),
-                'total_trades': state['total_trades'] + 1,
-                'trade_history': state['trade_history'] + [{
-                    'date': datetime.now().isoformat(),
-                    'type': 'sell',
-                    'amount': btc_to_sell,
-                    'price': current_price
-                }],
-                'purchase_prices': [],
-                'total_btc': 0.0,
-                'original_strategy_budget': balance['IDR']['total'] * 0.7,
-                'remaining_budget': (balance['IDR']['total'] * 0.7) * 0.5
-            })
-            save_state(state)
-            print(f"[RE-ENTRY] New budget: {state['remaining_budget']:,.0f} IDR")
+def handle_reporting(balance, current_price, state):
+    last_report = state['last_report']
+    if not last_report or (datetime.now() - datetime.fromisoformat(last_report)).days >= REPORT_INTERVAL:
+        report = generate_report(balance, current_price, state)
+        send_email("Indodax Biweekly Report", report)
+        state['last_report'] = datetime.now().isoformat()
+        logging.info("Report sent successfully")
 
-        # --- DCA Buy Logic (10% drop) ---
-        elif state['purchase_prices']:
-            last_price = state['purchase_prices'][-1]
-            if (last_price - current_price) / last_price >= DCA_DROP:
-                buy_amount = min(state['remaining_budget'] * 0.5, balance['IDR']['free'])
-                btc_amount = round(buy_amount / current_price, 8)  # FIXED: Rounded to 8 decimals
-                
-                if btc_amount >= MIN_BTC_ORDER:
-                    print(f"[DCA BUY] Buying {btc_amount:.8f} BTC @ {current_price:,.0f} IDR")  # FIXED: .8f
-                    if not DRY_RUN:
-                        indodax.create_order(
-                            symbol='BTC/IDR',
-                            type='market',
-                            side='buy',
-                            amount=btc_amount,
-                            price=current_price,
-                            params={'idr': buy_amount}
-                        )
-                    state['purchase_prices'].append(current_price)
-                    state['total_btc'] += btc_amount
-                    state['total_idr_spent'] += buy_amount
-                    state['remaining_budget'] -= buy_amount
-                    state['total_trades'] += 1
-                    save_state(state)
+def generate_report(balance, current_price, state):
+    avg_price = (state['total_idr_spent'] / state['total_btc']) if state['total_btc'] else 0
+    current_btc = Decimal(str(balance['BTC']['total']))
+    current_value = current_btc * current_price + Decimal(str(balance['IDR']['total']))
+    unrealized_pnl = current_btc * current_price - state['total_idr_spent']
+    
+    return f"""
+    📈 Biweekly Report - {datetime.now().strftime('%Y-%m-%d')}
+    ==================================
+    - Strategy Budget: {state['original_budget']:.0f} IDR
+    - Current Value: {current_value:.0f} IDR
+    - Avg Purchase Price: {avg_price:.0f} IDR
+    - Realized P&L: {state['realized_pnl']:+.0f} IDR
+    - Unrealized P&L: {unrealized_pnl:+.0f} IDR
+    - Total Trades: {len(state['trade_history'])}
+    - Next Buy Trigger: {(Decimal(str(state['purchase_prices'][-1])) * 0.9):.0f} IDR
+    - 30D Price Change: {((current_price - avg_price)/avg_price * 100):+.2f}%
+    """
 
-        # Reporting
-        if check_report_due():
-            report = generate_report(balance, current_price, state)
-            send_email("Indodax Biweekly Report", report)
-            with open(LAST_REPORT_FILE, 'w') as f:
-                f.write(datetime.now().isoformat())
-            save_state(state)
-
-        print("Operation completed successfully")
-
+def send_email(subject, body):
+    msg = MIMEText(body)
+    msg['Subject'] = subject
+    msg['From'] = os.getenv("EMAIL_SENDER")
+    msg['To'] = os.getenv("EMAIL_RECEIVER")
+    
+    try:
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
+            server.login(os.getenv("EMAIL_SENDER"), os.getenv("EMAIL_PASSWORD"))
+            server.sendmail(
+                os.getenv("EMAIL_SENDER"),
+                [os.getenv("EMAIL_RECEIVER")],
+                msg.as_string()
+            )
+        logging.info("Email report sent successfully")
     except Exception as e:
-        print(f"[ERROR] {str(e)}")
-        raise
+        logging.error(f"Failed to send email: {str(e)}")
 
 if __name__ == "__main__":
     execute_strategy()
