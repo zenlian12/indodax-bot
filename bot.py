@@ -126,10 +126,10 @@ def execute_strategy():
         # Initial Buy (first purchase in cycle)
         if not state['purchase_prices'] and state['remaining_budget'] > 0:
             buy_amount = min(state['remaining_budget'], balance['IDR']['free'])
-            btc_amount = buy_amount / current_price
+            btc_amount = round(buy_amount / current_price, 8)  # FIXED: Rounded to 8 decimals
             
             if btc_amount >= MIN_BTC_ORDER:
-                print(f"[INITIAL BUY] Buying {btc_amount:.6f} BTC @ {current_price:,.0f} IDR")
+                print(f"[INITIAL BUY] Buying {btc_amount:.8f} BTC @ {current_price:,.0f} IDR")  # FIXED: .8f
                 if not DRY_RUN:
                     indodax.create_order(
                         symbol='BTC/IDR',
@@ -148,17 +148,18 @@ def execute_strategy():
 
         # --- Take Profit Check (6% from average) ---
         if state['purchase_prices'] and current_price >= avg_price * (1 + TAKE_PROFIT):
+            btc_to_sell = round(state['total_btc'], 8)  # FIXED: Rounded to 8 decimals
             print(f"[SELL] 6% profit reached (Avg: {avg_price:,.0f} IDR, Current: {current_price:,.0f} IDR)")
             if not DRY_RUN:
                 indodax.create_order(
                     symbol='BTC/IDR',
                     type='market',
                     side='sell',
-                    amount=state['total_btc'],
+                    amount=btc_to_sell,
                     price=current_price,
-                    params={'btc': state['total_btc']}
+                    params={'btc': btc_to_sell}  # FIXED: Rounded value
                 )
-            profit = (current_price * state['total_btc']) - state['total_idr_spent']
+            profit = (current_price * btc_to_sell) - state['total_idr_spent']
             state.update({
                 'realized_pnl': state['realized_pnl'] + profit,
                 'total_idr_spent': 0.0,
@@ -167,7 +168,7 @@ def execute_strategy():
                 'trade_history': state['trade_history'] + [{
                     'date': datetime.now().isoformat(),
                     'type': 'sell',
-                    'amount': state['total_btc'],
+                    'amount': btc_to_sell,
                     'price': current_price
                 }],
                 'purchase_prices': [],
@@ -183,10 +184,10 @@ def execute_strategy():
             last_price = state['purchase_prices'][-1]
             if (last_price - current_price) / last_price >= DCA_DROP:
                 buy_amount = min(state['remaining_budget'] * 0.5, balance['IDR']['free'])
-                btc_amount = buy_amount / current_price
+                btc_amount = round(buy_amount / current_price, 8)  # FIXED: Rounded to 8 decimals
                 
                 if btc_amount >= MIN_BTC_ORDER:
-                    print(f"[DCA BUY] Buying {btc_amount:.6f} BTC @ {current_price:,.0f} IDR")
+                    print(f"[DCA BUY] Buying {btc_amount:.8f} BTC @ {current_price:,.0f} IDR")  # FIXED: .8f
                     if not DRY_RUN:
                         indodax.create_order(
                             symbol='BTC/IDR',
