@@ -1,1 +1,1 @@
-{"original_strategy_budget": 282975.69999999995, "remaining_budget": 141487.84999999998, "purchase_prices": [], "total_btc": 0.0, "total_trades": 0, "winning_trades": 0, "max_drawdown": 0.0, "trade_history": [], "total_idr_spent": 0.0, "realized_pnl": 0.0, "equity_peak": null}
+{"original_strategy_budget": 282975.69999999995, "remaining_budget": 0.0, "purchase_prices": [1578005000.0], "total_btc": 8.966e-05, "total_trades": 1, "winning_trades": 0, "max_drawdown": 0.0, "trade_history": [], "total_idr_spent": 141487.84999999998, "realized_pnl": 0.0, "equity_peak": null}
