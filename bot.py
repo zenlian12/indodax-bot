@@ -53,14 +53,19 @@ def load_state():
         return default_state
 
 def save_state(state):
-    with open(STATE_FILE, 'w') as f:
-        json.dump(state, f)
-    repo_url = f"https://{os.environ['PAT']}@github.com/{os.environ['GITHUB_REPOSITORY']}.git"
-    os.system('git config --global user.email "actions@github.com"')
-    os.system('git config --global user.name "GitHub Actions"')
-    os.system(f'git add {STATE_FILE}')
-    os.system('git commit -m "Update bot state"')
-    os.system(f'git push {repo_url} HEAD:main')
+    try:
+        with open(STATE_FILE, 'w') as f:
+            json.dump(state, f)
+        # FIX: Added error handling for Git operations
+        repo_url = f"https://{os.environ['PAT']}@github.com/{os.environ['GITHUB_REPOSITORY']}.git"
+        os.system('git config --global user.email "actions@github.com"')
+        os.system('git config --global user.name "GitHub Actions"')
+        os.system(f'git add {STATE_FILE}')
+        os.system('git commit -m "Update bot state"')
+        os.system(f'git push {repo_url} HEAD:main')
+    except Exception as e:
+        print(f"State save failed: {str(e)}")
+        raise
 
 # --- Email Reporting ---
 def send_email(subject, body):
@@ -73,7 +78,10 @@ def send_email(subject, body):
         server.sendmail(EMAIL_SENDER, EMAIL_RECEIVER, msg.as_string())
 
 def generate_report(balance, btc_price, state):
-    avg_price = sum(state['purchase_prices'])/len(state['purchase_prices']) if state['purchase_prices'] else 0
+    if not state['purchase_prices']:
+        return "No active trades to report"
+        
+    avg_price = sum(state['purchase_prices']) / len(state['purchase_prices'])
     current_idr = balance.get('IDR', {}).get('total', 0) or 0
     current_btc = balance.get('BTC', {}).get('total', 0) or 0
     current_value = current_idr + (current_btc * btc_price)
@@ -116,12 +124,19 @@ def execute_strategy():
 
         # Initialize strategy (first run or after sell)
         if not state['purchase_prices'] and state['remaining_budget'] is None:
-            state['original_strategy_budget'] = balance['IDR']['total'] * 0.7
-            state['remaining_budget'] = state['original_strategy_budget'] * 0.5
-            save_state(state)
+            # FIX: Use 70% of IDR balance but check available funds
+            idr_balance = balance['IDR']['total']
+            strategy_budget = idr_balance * 0.7
+            state.update({
+                'original_strategy_budget': strategy_budget,
+                'remaining_budget': strategy_budget * 0.5,
+                'total_idr_spent': 0.0,
+                'total_btc': 0.0
+            })
+            save_state(state)  # Ensure immediate state save
 
         # Calculate average purchase price
-        avg_price = sum(state['purchase_prices'])/len(state['purchase_prices']) if state['purchase_prices'] else 0
+        avg_price = sum(state['purchase_prices']) / len(state['purchase_prices']) if state['purchase_prices'] else 0
 
         # Initial Buy (first purchase in cycle)
         if not state['purchase_prices'] and state['remaining_budget'] > 0:
@@ -131,51 +146,61 @@ def execute_strategy():
             if btc_amount >= MIN_BTC_ORDER:
                 print(f"[INITIAL BUY] Buying {btc_amount:.6f} BTC @ {current_price:,.0f} IDR")
                 if not DRY_RUN:
-                    indodax.create_order(
+                    # FIX: Use market buy with correct parameters
+                    order = indodax.create_order(
                         symbol='BTC/IDR',
                         type='market',
                         side='buy',
                         amount=None,
-                        price=current_price,
-                        params={'idr': buy_amount}
+                        params={'idr': buy_amount}  # Specify IDR amount directly
                     )
-                state['purchase_prices'].append(current_price)
+                    # Update state with actual filled price
+                    filled_price = order['average']
+                    state['purchase_prices'].append(filled_price)
+                else:
+                    state['purchase_prices'].append(current_price)
+                    
                 state['total_btc'] += btc_amount
                 state['total_idr_spent'] += buy_amount
                 state['remaining_budget'] -= buy_amount
                 state['total_trades'] += 1
-                save_state(state)
+                save_state(state)  # Ensure state saved immediately after buy
 
         # --- Take Profit Check (6% from average) ---
-        if state['purchase_prices'] and current_price >= avg_price * (1 + TAKE_PROFIT):
-            print(f"[SELL] 6% profit reached (Avg: {avg_price:,.0f} IDR, Current: {current_price:,.0f} IDR)")
-            if not DRY_RUN:
-                indodax.create_order(
-                    symbol='BTC/IDR',
-                    type='market',
-                    side='sell',
-                    amount=state['total_btc'],
-                    price=None
-                )
-            profit = (current_price * state['total_btc']) - state['total_idr_spent']
-            state.update({
-                'realized_pnl': state['realized_pnl'] + profit,
-                'total_idr_spent': 0.0,  # Critical reset
-                'winning_trades': state['winning_trades'] + (1 if profit > 0 else 0),
-                'total_trades': state['total_trades'] + 1,
-                'trade_history': state['trade_history'] + [{
-                    'date': datetime.now().isoformat(),
-                    'type': 'sell',
-                    'amount': state['total_btc'],
-                    'price': current_price
-                }],
-                'purchase_prices': [],
-                'total_btc': 0.0,
-                'original_strategy_budget': balance['IDR']['total'] * 0.7,
-                'remaining_budget': (balance['IDR']['total'] * 0.7) * 0.5
-            })
-            save_state(state)
-            print(f"[RE-ENTRY] New budget: {state['remaining_budget']:,.0f} IDR")
+        if state['purchase_prices']:
+            avg_price = sum(state['purchase_prices']) / len(state['purchase_prices'])
+            if current_price >= avg_price * (1 + TAKE_PROFIT):
+                print(f"[SELL] 6% profit reached (Avg: {avg_price:,.0f} IDR, Current: {current_price:,.0f} IDR)")
+                if not DRY_RUN:
+                    # FIX: Remove price parameter for market sell
+                    indodax.create_order(
+                        symbol='BTC/IDR',
+                        type='market',
+                        side='sell',
+                        amount=state['total_btc']
+                    )
+                profit = (current_price * state['total_btc']) - state['total_idr_spent']
+                # FIX: Proper state reset after sell
+                new_balance = indodax.fetch_balance()
+                new_idr_balance = new_balance['IDR']['total']
+                state.update({
+                    'realized_pnl': state['realized_pnl'] + profit,
+                    'total_idr_spent': 0.0,
+                    'winning_trades': state['winning_trades'] + (1 if profit > 0 else 0),
+                    'total_trades': state['total_trades'] + 1,
+                    'trade_history': state['trade_history'] + [{
+                        'date': datetime.now().isoformat(),
+                        'type': 'sell',
+                        'amount': state['total_btc'],
+                        'price': current_price
+                    }],
+                    'purchase_prices': [],
+                    'total_btc': 0.0,
+                    'original_strategy_budget': new_idr_balance * 0.7,
+                    'remaining_budget': new_idr_balance * 0.7 * 0.5
+                })
+                save_state(state)
+                print(f"[RE-ENTRY] New budget: {state['remaining_budget']:,.0f} IDR")
 
         # --- DCA Buy Logic (10% drop) ---
         elif state['purchase_prices']:
@@ -187,15 +212,18 @@ def execute_strategy():
                 if btc_amount >= MIN_BTC_ORDER:
                     print(f"[DCA BUY] Buying {btc_amount:.6f} BTC @ {current_price:,.0f} IDR")
                     if not DRY_RUN:
-                        indodax.create_order(
+                        order = indodax.create_order(
                             symbol='BTC/IDR',
                             type='market',
                             side='buy',
                             amount=None,
-                            price=current_price,
                             params={'idr': buy_amount}
                         )
-                    state['purchase_prices'].append(current_price)
+                        filled_price = order['average']
+                        state['purchase_prices'].append(filled_price)
+                    else:
+                        state['purchase_prices'].append(current_price)
+                        
                     state['total_btc'] += btc_amount
                     state['total_idr_spent'] += buy_amount
                     state['remaining_budget'] -= buy_amount
