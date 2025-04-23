@@ -56,7 +56,7 @@ def save_state(state):
     try:
         with open(STATE_FILE, 'w') as f:
             json.dump(state, f)
-        # FIX: Added error handling for Git operations
+        # Git operations for state persistence [[8]]
         repo_url = f"https://{os.environ['PAT']}@github.com/{os.environ['GITHUB_REPOSITORY']}.git"
         os.system('git config --global user.email "actions@github.com"')
         os.system('git config --global user.name "GitHub Actions"')
@@ -124,7 +124,6 @@ def execute_strategy():
 
         # Initialize strategy (first run or after sell)
         if not state['purchase_prices'] and state['remaining_budget'] is None:
-            # FIX: Use 70% of IDR balance but check available funds
             idr_balance = balance['IDR']['total']
             strategy_budget = idr_balance * 0.7
             state.update({
@@ -133,10 +132,7 @@ def execute_strategy():
                 'total_idr_spent': 0.0,
                 'total_btc': 0.0
             })
-            save_state(state)  # Ensure immediate state save
-
-        # Calculate average purchase price
-        avg_price = sum(state['purchase_prices']) / len(state['purchase_prices']) if state['purchase_prices'] else 0
+            save_state(state)  # Immediate state save
 
         # Initial Buy (first purchase in cycle)
         if not state['purchase_prices'] and state['remaining_budget'] > 0:
@@ -146,15 +142,15 @@ def execute_strategy():
             if btc_amount >= MIN_BTC_ORDER:
                 print(f"[INITIAL BUY] Buying {btc_amount:.6f} BTC @ {current_price:,.0f} IDR")
                 if not DRY_RUN:
-                    # FIX: Use market buy with correct parameters
+                    # FIX: Added price parameter for market buy [[1]][[8]]
                     order = indodax.create_order(
                         symbol='BTC/IDR',
                         type='market',
                         side='buy',
                         amount=None,
-                        params={'idr': buy_amount}  # Specify IDR amount directly
+                        price=current_price,  # Required for cost calculation
+                        params={'idr': buy_amount}
                     )
-                    # Update state with actual filled price
                     filled_price = order['average']
                     state['purchase_prices'].append(filled_price)
                 else:
@@ -164,7 +160,7 @@ def execute_strategy():
                 state['total_idr_spent'] += buy_amount
                 state['remaining_budget'] -= buy_amount
                 state['total_trades'] += 1
-                save_state(state)  # Ensure state saved immediately after buy
+                save_state(state)  # Ensure state saved
 
         # --- Take Profit Check (6% from average) ---
         if state['purchase_prices']:
@@ -172,7 +168,7 @@ def execute_strategy():
             if current_price >= avg_price * (1 + TAKE_PROFIT):
                 print(f"[SELL] 6% profit reached (Avg: {avg_price:,.0f} IDR, Current: {current_price:,.0f} IDR)")
                 if not DRY_RUN:
-                    # FIX: Remove price parameter for market sell
+                    # Market sell without price parameter [[8]]
                     indodax.create_order(
                         symbol='BTC/IDR',
                         type='market',
@@ -180,7 +176,6 @@ def execute_strategy():
                         amount=state['total_btc']
                     )
                 profit = (current_price * state['total_btc']) - state['total_idr_spent']
-                # FIX: Proper state reset after sell
                 new_balance = indodax.fetch_balance()
                 new_idr_balance = new_balance['IDR']['total']
                 state.update({
@@ -217,6 +212,7 @@ def execute_strategy():
                             type='market',
                             side='buy',
                             amount=None,
+                            price=current_price,  # Required for cost calculation [[8]]
                             params={'idr': buy_amount}
                         )
                         filled_price = order['average']
