@@ -135,9 +135,9 @@ def execute_strategy():
                         symbol='BTC/IDR',
                         type='market',
                         side='buy',
-                        amount=None,
-                        price=None,
-                        params={'idr': buy_amount}  # FIXED: Specify IDR amount
+                        amount=btc_amount,
+                        price=current_price,
+                        params={'idr': buy_amount}
                     )
                 state['purchase_prices'].append(current_price)
                 state['total_btc'] += btc_amount
@@ -154,9 +154,9 @@ def execute_strategy():
                     symbol='BTC/IDR',
                     type='market',
                     side='sell',
-                    amount=None,
-                    price=None,
-                    params={'btc': state['total_btc']}  # FIXED: Specify BTC amount
+                    amount=state['total_btc'],
+                    price=current_price,
+                    params={'btc': state['total_btc']}
                 )
             profit = (current_price * state['total_btc']) - state['total_idr_spent']
             state.update({
@@ -192,9 +192,9 @@ def execute_strategy():
                             symbol='BTC/IDR',
                             type='market',
                             side='buy',
-                            amount=None,
-                            price=None,
-                            params={'idr': buy_amount}  # FIXED: Specify IDR amount
+                            amount=btc_amount,
+                            price=current_price,
+                            params={'idr': buy_amount}
                         )
                     state['purchase_prices'].append(current_price)
                     state['total_btc'] += btc_amount
