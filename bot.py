@@ -124,7 +124,7 @@ def execute_strategy():
     try:
         balance = indodax.fetch_balance()
         ticker = indodax.fetch_ticker('BTC/IDR')
-        current_price = ticker.get('last')  # Removed default value [[3]]
+        current_price = ticker.get('last')
         if current_price is None:
             raise ValueError("Failed to fetch current price")
             
@@ -158,11 +158,12 @@ def execute_strategy():
                         price=current_price,
                         params={'idr': buy_amount}
                     )
-                    filled_price = order.get('average')  # Use .get() [[1]]
-                    if filled_price is not None:
+                    # FIX: Use current_price as fallback if order['average'] missing [[1]][[7]]
+                    filled_price = order.get('average') or current_price
+                    if filled_price and filled_price > 0:
                         state['purchase_prices'].append(filled_price)
                     else:
-                        print("Error: Failed to retrieve filled price")
+                        print("Critical error: Failed to record price")
                 else:
                     state['purchase_prices'].append(current_price)
                     
@@ -224,11 +225,12 @@ def execute_strategy():
                             price=current_price,
                             params={'idr': buy_amount}
                         )
-                        filled_price = order.get('average')
-                        if filled_price is not None:
+                        # FIX: Use current_price as fallback [[7]]
+                        filled_price = order.get('average') or current_price
+                        if filled_price and filled_price > 0:
                             state['purchase_prices'].append(filled_price)
                         else:
-                            print("Error: Failed to retrieve filled price")
+                            print("Critical error: Failed to record price")
                     else:
                         state['purchase_prices'].append(current_price)
                         
