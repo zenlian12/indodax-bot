@@ -34,7 +34,8 @@ indodax = ccxt.indodax({
 def load_state():
     default_state = {
         'original_strategy_budget': None,
-        'remaining_budget': None,
+        'initial_budget': None,    # Initial buy pool
+        'dca_budget': None,        # DCA buy pool
         'purchase_prices': [],
         'total_btc': 0.0,
         'total_trades': 0,
@@ -48,7 +49,7 @@ def load_state():
     try:
         with open(STATE_FILE, 'r') as f:
             saved_state = json.load(f)
-            # Validate purchase_prices [[1]][[3]]
+            # Validate purchase_prices
             validated_prices = []
             for p in saved_state.get('purchase_prices', []):
                 if isinstance(p, (int, float)) and p > 0:
@@ -131,20 +132,21 @@ def execute_strategy():
         state = load_state()
 
         # Initialize strategy
-        if not state['purchase_prices'] and state['remaining_budget'] is None:
+        if not state['purchase_prices'] and state['initial_budget'] is None:
             idr_balance = balance['IDR']['total']
             strategy_budget = idr_balance * 0.7
             state.update({
                 'original_strategy_budget': strategy_budget,
-                'remaining_budget': strategy_budget * 0.5,
+                'initial_budget': strategy_budget * 0.5,  # 50% for initial buys
+                'dca_budget': strategy_budget * 0.5,      # 50% for DCA buys
                 'total_idr_spent': 0.0,
                 'total_btc': 0.0
             })
             save_state(state)
 
         # Initial Buy
-        if not state['purchase_prices'] and state['remaining_budget'] > 0:
-            buy_amount = min(state['remaining_budget'], balance['IDR']['free'])
+        if not state['purchase_prices'] and state['initial_budget'] > 0:
+            buy_amount = min(state['initial_budget'], balance['IDR']['free'])
             btc_amount = buy_amount / current_price
             
             if btc_amount >= MIN_BTC_ORDER:
@@ -158,7 +160,6 @@ def execute_strategy():
                         price=current_price,
                         params={'idr': buy_amount}
                     )
-                    # FIX: Use current_price as fallback if order['average'] missing [[1]][[7]]
                     filled_price = order.get('average') or current_price
                     if filled_price and filled_price > 0:
                         state['purchase_prices'].append(filled_price)
@@ -169,7 +170,7 @@ def execute_strategy():
                     
                 state['total_btc'] += btc_amount
                 state['total_idr_spent'] += buy_amount
-                state['remaining_budget'] -= buy_amount
+                state['initial_budget'] -= buy_amount  # Deduct from initial pool
                 state['total_trades'] += 1
                 save_state(state)
 
@@ -188,6 +189,7 @@ def execute_strategy():
                 profit = (current_price * state['total_btc']) - state['total_idr_spent']
                 new_balance = indodax.fetch_balance()
                 new_idr_balance = new_balance['IDR']['total']
+                strategy_budget = new_idr_balance * 0.7
                 state.update({
                     'realized_pnl': state['realized_pnl'] + profit,
                     'total_idr_spent': 0.0,
@@ -201,17 +203,18 @@ def execute_strategy():
                     }],
                     'purchase_prices': [],
                     'total_btc': 0.0,
-                    'original_strategy_budget': new_idr_balance * 0.7,
-                    'remaining_budget': new_idr_balance * 0.7 * 0.5
+                    'original_strategy_budget': strategy_budget,
+                    'initial_budget': strategy_budget * 0.5,  # Reset pools
+                    'dca_budget': strategy_budget * 0.5
                 })
                 save_state(state)
-                print(f"[RE-ENTRY] New budget: {state['remaining_budget']:,.0f} IDR")
+                print(f"[RE-ENTRY] New budget: {state['original_strategy_budget']:,.0f} IDR")
 
         # --- DCA Buy Logic ---
         elif state['purchase_prices']:
             last_price = state['purchase_prices'][-1]
             if (last_price - current_price) / last_price >= DCA_DROP:
-                buy_amount = min(state['remaining_budget'] * 0.5, balance['IDR']['free'])
+                buy_amount = min(state['dca_budget'] * 0.5, balance['IDR']['free'])  # Use 50% of DCA pool
                 btc_amount = buy_amount / current_price
                 
                 if btc_amount >= MIN_BTC_ORDER:
@@ -225,7 +228,6 @@ def execute_strategy():
                             price=current_price,
                             params={'idr': buy_amount}
                         )
-                        # FIX: Use current_price as fallback [[7]]
                         filled_price = order.get('average') or current_price
                         if filled_price and filled_price > 0:
                             state['purchase_prices'].append(filled_price)
@@ -236,7 +238,7 @@ def execute_strategy():
                         
                     state['total_btc'] += btc_amount
                     state['total_idr_spent'] += buy_amount
-                    state['remaining_budget'] -= buy_amount
+                    state['dca_budget'] -= buy_amount  # Deduct from DCA pool
                     state['total_trades'] += 1
                     save_state(state)
 
