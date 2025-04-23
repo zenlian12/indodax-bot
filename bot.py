@@ -125,105 +125,82 @@ def execute_strategy():
 
         # Initial Buy (first purchase in cycle)
         if not state['purchase_prices'] and state['remaining_budget'] > 0:
-            buy_amount = int(min(state['remaining_budget'], balance['IDR']['free']))
-            fee_rate = 0.003  # 0.3% fee
-            btc_amount = round((buy_amount * (1 - fee_rate)) / current_price, 8)
+            buy_amount = min(state['remaining_budget'], balance['IDR']['free'])
+            btc_amount = buy_amount / current_price
             
             if btc_amount >= MIN_BTC_ORDER:
-                print(f"[INITIAL BUY] Buying {btc_amount:.8f} BTC @ {current_price:,.0f} IDR")
+                print(f"[INITIAL BUY] Buying {btc_amount:.6f} BTC @ {current_price:,.0f} IDR")
                 if not DRY_RUN:
-                    try:
-                        indodax.create_order(
-                            symbol='BTC/IDR',
-                            type='market',
-                            side='buy',
-                            amount=btc_amount,
-                            price=current_price,
-                            params={'quote_quantity': buy_amount}
-                        )
-                        # Re-fetch balance to verify [[1]]
-                        balance = indodax.fetch_balance()
-                        state['total_btc'] = balance['BTC']['total']
-                        state['purchase_prices'].append(current_price)
-                        state['total_idr_spent'] += buy_amount
-                        state['remaining_budget'] -= buy_amount
-                        state['total_trades'] += 1
-                        save_state(state)
-                    except Exception as e:
-                        print(f"[BUY FAILED] {str(e)}")
-                        return
-
-        # --- Take Profit Check (6% from average) ---
-        if state['purchase_prices'] and current_price >= avg_price * (1 + TAKE_PROFIT):
-            fee_rate = 0.003
-            btc_to_sell = round(state['total_btc'] * (1 - fee_rate), 8)  # Account for fees [[2]]
-            print(f"[SELL] 6% profit reached (Avg: {avg_price:,.0f} IDR, Current: {current_price:,.0f} IDR)")
-            if not DRY_RUN:
-                try:
                     indodax.create_order(
                         symbol='BTC/IDR',
                         type='market',
-                        side='sell',
-                        amount=btc_to_sell,
+                        side='buy',
+                        amount=None,
                         price=current_price,
-                        params={'quantity': btc_to_sell}
+                        params={'idr': buy_amount}
                     )
-                    # Re-fetch balance [[1]]
-                    balance = indodax.fetch_balance()
-                    profit = (current_price * btc_to_sell) - state['total_idr_spent']
-                    state.update({
-                        'realized_pnl': state['realized_pnl'] + profit,
-                        'total_idr_spent': 0.0,
-                        'winning_trades': state['winning_trades'] + (1 if profit > 0 else 0),
-                        'total_trades': state['total_trades'] + 1,
-                        'trade_history': state['trade_history'] + [{
-                            'date': datetime.now().isoformat(),
-                            'type': 'sell',
-                            'amount': btc_to_sell,
-                            'price': current_price
-                        }],
-                        'purchase_prices': [],
-                        'total_btc': balance['BTC']['total'],  # Use real balance [[1]]
-                        'original_strategy_budget': balance['IDR']['total'] * 0.7,
-                        'remaining_budget': (balance['IDR']['total'] * 0.7) * 0.5
-                    })
-                    save_state(state)
-                    print(f"[RE-ENTRY] New budget: {state['remaining_budget']:,.0f} IDR")
-                except Exception as e:
-                    print(f"[SELL FAILED] {str(e)}")
-                    return
+                state['purchase_prices'].append(current_price)
+                state['total_btc'] += btc_amount
+                state['total_idr_spent'] += buy_amount
+                state['remaining_budget'] -= buy_amount
+                state['total_trades'] += 1
+                save_state(state)
+
+        # --- Take Profit Check (6% from average) ---
+        if state['purchase_prices'] and current_price >= avg_price * (1 + TAKE_PROFIT):
+            print(f"[SELL] 6% profit reached (Avg: {avg_price:,.0f} IDR, Current: {current_price:,.0f} IDR)")
+            if not DRY_RUN:
+                indodax.create_order(
+                    symbol='BTC/IDR',
+                    type='market',
+                    side='sell',
+                    amount=state['total_btc'],
+                    price=None
+                )
+            profit = (current_price * state['total_btc']) - state['total_idr_spent']
+            state.update({
+                'realized_pnl': state['realized_pnl'] + profit,
+                'total_idr_spent': 0.0,  # Critical reset
+                'winning_trades': state['winning_trades'] + (1 if profit > 0 else 0),
+                'total_trades': state['total_trades'] + 1,
+                'trade_history': state['trade_history'] + [{
+                    'date': datetime.now().isoformat(),
+                    'type': 'sell',
+                    'amount': state['total_btc'],
+                    'price': current_price
+                }],
+                'purchase_prices': [],
+                'total_btc': 0.0,
+                'original_strategy_budget': balance['IDR']['total'] * 0.7,
+                'remaining_budget': (balance['IDR']['total'] * 0.7) * 0.5
+            })
+            save_state(state)
+            print(f"[RE-ENTRY] New budget: {state['remaining_budget']:,.0f} IDR")
 
         # --- DCA Buy Logic (10% drop) ---
         elif state['purchase_prices']:
             last_price = state['purchase_prices'][-1]
             if (last_price - current_price) / last_price >= DCA_DROP:
-                buy_amount = int(min(state['remaining_budget'] * 0.5, balance['IDR']['free']))
-                fee_rate = 0.003
-                btc_amount = round((buy_amount * (1 - fee_rate)) / current_price, 8)
+                buy_amount = min(state['remaining_budget'] * 0.5, balance['IDR']['free'])
+                btc_amount = buy_amount / current_price
                 
                 if btc_amount >= MIN_BTC_ORDER:
-                    print(f"[DCA BUY] Buying {btc_amount:.8f} BTC @ {current_price:,.0f} IDR")
+                    print(f"[DCA BUY] Buying {btc_amount:.6f} BTC @ {current_price:,.0f} IDR")
                     if not DRY_RUN:
-                        try:
-                            indodax.create_order(
-                                symbol='BTC/IDR',
-                                type='market',
-                                side='buy',
-                                amount=btc_amount,
-                                price=current_price,
-                                params={'quote_quantity': buy_amount}
-                            )
-                            # Re-fetch balance [[1]]
-                            balance = indodax.fetch_balance()
-                            state['purchase_prices'].append(current_price)
-                            state['total_btc'] = balance['BTC']['total']
-                            state['total_idr_spent'] += buy_amount
-                            state['remaining_budget'] -= buy_amount
-                            state['total_trades'] += 1
-                            save_state(state)
-                        except Exception as e:
-                            print(f"[DCA BUY FAILED] {str(e)}")
-                            return
+                        indodax.create_order(
+                            symbol='BTC/IDR',
+                            type='market',
+                            side='buy',
+                            amount=None,
+                            price=current_price,
+                            params={'idr': buy_amount}
+                        )
+                    state['purchase_prices'].append(current_price)
+                    state['total_btc'] += btc_amount
+                    state['total_idr_spent'] += buy_amount
+                    state['remaining_budget'] -= buy_amount
+                    state['total_trades'] += 1
+                    save_state(state)
 
         # Reporting
         if check_report_due():
@@ -238,5 +215,6 @@ def execute_strategy():
     except Exception as e:
         print(f"[ERROR] {str(e)}")
         raise
+
 if __name__ == "__main__":
     execute_strategy()
